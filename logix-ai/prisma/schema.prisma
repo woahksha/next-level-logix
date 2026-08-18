@@ -1,0 +1,293 @@
+// ==================================================
+// Logix AI — Database Schema
+// Prisma + SQLite
+// ==================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================================================
+// ENUMS
+// ==================================================
+// SQLite has no native enum type, so Prisma's `enum` keyword is not
+// supported on this connector ("the current connector does not support
+// enums"). Each enum below has been converted to a plain `String` column
+// on the models that use it, constrained at the application layer by the
+// TypeScript union types in `types/*.ts` (and, where present, Prisma
+// `@default(...)`) instead of the database. The set of valid values is
+// unchanged — only the storage representation changed.
+//
+// UserRole:          TRANSPORTER | SHIPPER
+// KycStatus:         PENDING | VERIFIED | REJECTED
+// OrderStatus:       PENDING | BID_ACCEPTED | IN_TRANSIT | DELIVERED | CANCELLED
+// BidStatus:         PENDING | ACCEPTED | REJECTED
+// PaymentStatus:     PENDING | ADVANCE_PAID | COMPLETED
+// NotificationType:  ORDER_UPDATE | BID_UPDATE | PAYMENT_UPDATE | SOS_ALERT | GENERAL
+// SosStatus:         ACTIVE | RESOLVED
+// PricingType:       FIXED | NEGOTIABLE
+
+// ==================================================
+// USER
+// ==================================================
+
+model User {
+  id                String   @id @default(cuid())
+  name              String
+  role              String   // UserRole: TRANSPORTER | SHIPPER
+  email             String   @unique
+  phone             String   @unique
+  passwordHash      String
+  preferredLanguage String   @default("en")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  transporterProfile TransporterProfile?
+  shipperProfile     ShipperProfile?
+
+  // Orders posted by this user (when role = SHIPPER)
+  ordersAsShipper Order[] @relation("ShipperOrders")
+
+  // Bids placed by this user (when role = TRANSPORTER)
+  bids Bid[]
+
+  notifications Notification[]
+  sosAlerts     SosAlert[]
+
+  ratingsGiven    Rating[] @relation("RatingsGiven")
+  ratingsReceived Rating[] @relation("RatingsReceived")
+
+  @@map("users")
+}
+
+// ==================================================
+// TRANSPORTER PROFILE
+// ==================================================
+
+model TransporterProfile {
+  id                   String    @id @default(cuid())
+  userId               String    @unique
+  drivingLicenseNumber String    @unique
+  vehicleType          String
+  vehicleNumber        String    @unique
+  vehicleCapacity      Float
+  kycStatus            String    @default("PENDING") // KycStatus: PENDING | VERIFIED | REJECTED
+  upiId                String?
+  preferredRadiusKm    Int       @default(50)
+  preferredRouteFrom   String?
+  preferredRouteTo     String?
+  rating               Float     @default(0)
+  totalTrips           Int       @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("transporter_profiles")
+}
+
+// ==================================================
+// SHIPPER PROFILE
+// ==================================================
+
+model ShipperProfile {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  companyName String
+  gstNumber   String?   @unique
+  address     String
+  kycStatus   String    @default("PENDING") // KycStatus: PENDING | VERIFIED | REJECTED
+  rating      Float     @default(0)
+  totalOrders Int       @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("shipper_profiles")
+}
+
+// ==================================================
+// ORDER
+// ==================================================
+
+model Order {
+  id                  String      @id @default(cuid())
+  shipperId           String
+
+  // Pickup
+  pickupLocation      String // city name — must match a key in lib/geo.ts CITY_COORDS
+  pickupAddress       String      @default("")
+  pickupDateTime      DateTime    @default(now())
+  pickupLatitude      Float
+  pickupLongitude     Float
+
+  // Delivery
+  dropLocation        String // city name — must match a key in lib/geo.ts CITY_COORDS
+  dropAddress         String      @default("")
+  dropLatitude        Float
+  dropLongitude       Float
+
+  distanceKm          Float
+
+  // Cargo
+  productType         String
+  weightKg            Float
+  volume              Float?
+  packageCount        Int?
+  dimensions          String?
+  isFragile           Boolean     @default(false)
+  isTemperatureSensitive Boolean  @default(false)
+  specialHandlingNotes String?
+
+  // Vehicle requirement
+  truckTypeRequired   String
+  minCapacityTons     Float?
+
+  // Pricing — FIXED uses proposedRate only; NEGOTIABLE uses minRate/maxRate
+  // (proposedRate is still populated for NEGOTIABLE orders as the
+  // midpoint, so every existing view that reads proposedRate keeps working)
+  pricingType         String      @default("FIXED") // PricingType: FIXED | NEGOTIABLE
+  proposedRate        Float
+  minRate              Float?
+  maxRate              Float?
+
+  deliveryDeadline    DateTime
+  status              String      @default("PENDING") // OrderStatus: PENDING | BID_ACCEPTED | IN_TRANSIT | DELIVERED | CANCELLED
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
+
+  shipper User @relation("ShipperOrders", fields: [shipperId], references: [id], onDelete: Cascade)
+
+  bids             Bid[]
+  payments         Payment[]
+  ratings          Rating[]
+  trackingUpdates  TrackingUpdate[]
+  proofOfDelivery  ProofOfDelivery?
+  sosAlerts        SosAlert[]
+
+  @@map("orders")
+}
+
+// ==================================================
+// BID
+// ==================================================
+
+model Bid {
+  id            String    @id @default(cuid())
+  orderId       String
+  transporterId String
+  bidAmount     Float
+  status        String    @default("PENDING") // BidStatus: PENDING | ACCEPTED | REJECTED
+  createdAt     DateTime  @default(now())
+
+  order       Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  transporter User  @relation(fields: [transporterId], references: [id], onDelete: Cascade)
+
+  @@map("bids")
+}
+
+// ==================================================
+// PAYMENT
+// ==================================================
+
+model Payment {
+  id            String        @id @default(cuid())
+  orderId       String
+  amount        Float
+  advancePercent Float        @default(0)
+  status        String        @default("PENDING") // PaymentStatus: PENDING | ADVANCE_PAID | COMPLETED
+  transactionId String?       @unique
+  createdAt     DateTime      @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+// ==================================================
+// RATING
+// ==================================================
+
+model Rating {
+  id         String   @id @default(cuid())
+  orderId    String
+  fromUserId String
+  toUserId   String
+  score      Int
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  order    Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromUser User  @relation("RatingsGiven", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User  @relation("RatingsReceived", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@map("ratings")
+}
+
+// ==================================================
+// SUPPORTING MODELS
+// ==================================================
+
+// In-app notifications (order updates, bid updates, payment updates, SOS, etc.)
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String           @default("GENERAL") // NotificationType: ORDER_UPDATE | BID_UPDATE | PAYMENT_UPDATE | SOS_ALERT | GENERAL
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
+
+// SOS / emergency alerts raised during a trip
+model SosAlert {
+  id        String    @id @default(cuid())
+  orderId   String
+  userId    String
+  latitude  Float
+  longitude Float
+  message   String?
+  status    String    @default("ACTIVE") // SosStatus: ACTIVE | RESOLVED
+  createdAt DateTime  @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sos_alerts")
+}
+
+// Live shipment location/status pings for an order in transit
+model TrackingUpdate {
+  id        String      @id @default(cuid())
+  orderId   String
+  latitude  Float
+  longitude Float
+  status    String      // OrderStatus: PENDING | BID_ACCEPTED | IN_TRANSIT | DELIVERED | CANCELLED
+  note      String?
+  createdAt DateTime    @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("tracking_updates")
+}
+
+// Proof of delivery captured when an order is marked DELIVERED
+model ProofOfDelivery {
+  id             String   @id @default(cuid())
+  orderId        String   @unique
+  imageUrl       String
+  signatureUrl   String?
+  receivedByName String?
+  notes          String?
+  deliveredAt    DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("proof_of_deliveries")
+}
